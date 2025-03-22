@@ -2,7 +2,7 @@ import { ethers } from "ethers";
 import TelegramBot from "node-telegram-bot-api";
 import dotenv from "dotenv";
 dotenv.config();
-
+//test
 // const pulseRpc = "https://rpc.pulsechain.com";
 // const pulseRpc = "https://pulsechain.publicnode.com";
 const pulseRpc = "https://pulsechain-rpc.publicnode.com";
