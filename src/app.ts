@@ -1,301 +1,234 @@
-import { ethers } from "ethers";
-import TelegramBot from "node-telegram-bot-api";
+import { WebSocketProvider, Interface, ethers } from "ethers";
 import dotenv from "dotenv";
 dotenv.config();
-//test
-// const pulseRpc = "https://rpc.pulsechain.com";
-// const pulseRpc = "https://pulsechain.publicnode.com";
-const pulseRpc = "https://pulsechain-rpc.publicnode.com";
-const provider = new ethers.JsonRpcProvider(pulseRpc);
+// Set up WebSocket connection
+// const provider = new WebSocketProvider("wss://ethereum-rpc.publicnode.com");
+const provider = new WebSocketProvider(
+  "wss://go.getblock.io/d50f7214d0654bc98dc58c30f86b578b"
+);
+// const provider = new WebSocketProvider("https://eth.llamarpc.com");
 
-// Telegram setup
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN as string;
-if (!TELEGRAM_BOT_TOKEN) {
-  console.error("❌ TELEGRAM_BOT_TOKEN not found in environment variables");
-  process.exit(1);
-}
-const TELEGRAM_CHAT_ID = process.env.CHAT_ID as string;
-const DEVELOPER_ADDRESSES = (process.env.DEVELOPER_ADDRESSES || "")
-  .split(",")
-  .map((addr) => addr.trim().toLowerCase()); // Normalize to lowercase for comparison;
+// Uniswap V2 Router address and ABI
+const UNISWAP_V2_ROUTER = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"; // Mainnet
+const UNISWAP_V2_ABI = [
+  "function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] path, address to, uint deadline)",
+  "function swapExactETHForTokens(uint amountOutMin, address[] path, address to, uint deadline)",
+  "function swapTokensForExactTokens(uint amountOut, uint amountInMax, address[] path, address to, uint deadline)",
+  "function swapTokensForExactETH(uint amountOut, uint amountInMax, address[] path, address to, uint deadline)",
+  "function swapExactTokensForETH(uint amountIn, uint amountOutMin, address[] path, address to, uint deadline)",
+  "function swapETHForExactTokens(uint amountOut, address[] path, address to, uint deadline)",
+];
+const UNISWAP_V2_FACTORY = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"; // Mainnet
+const UNISWAP_V2_FACTORY_ABI = [
+  "function getPair(address tokenA, address tokenB) external view returns (address pair)",
+];
 
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
+const iface = new Interface(UNISWAP_V2_ABI);
 
-// Set commands in Telegram UI
-bot.setMyCommands([
-  { command: "start", description: "Start the bot" },
-  { command: "help", description: "Get help information" },
-  { command: "status", description: "Check bot status" },
-]);
+let parsedData: { parsed: any; tx: any }[] = [];
 
-// /start command handler
-bot.onText(/\/start/, (msg) => {
-  const chatId = msg.chat.id;
-
-  const welcomeMessage =
-    `👋 Welcome to the PulseChain ERC-20 Detector Bot!\n\n` +
-    `I will notify you whenever a new ERC-20 token is deployed on PulseChain.\n\n` +
-    `👉 Press the button below to get the latest update or wait for alerts!`;
-
-  bot.sendMessage(chatId, welcomeMessage, {
-    reply_markup: {
-      keyboard: [[{ text: "📢 Get Latest Token Info" }]],
-      resize_keyboard: true,
-    },
-  });
-
-  if (!msg.from) {
-    console.error('Message "from" field is undefined.');
-    return;
-  }
-
-  const userId = msg.from.id;
-  const firstName = msg.from.first_name || "";
-  const lastName = msg.from.last_name || "";
-  const username = msg.from.username ? `@${msg.from.username}` : "No username";
-
-  const ownerMessage = `
-👤 *New User Started the Bot!*
-
-🆔 *ID:* ${userId}
-👨‍💻 *Name:* ${firstName} ${lastName}
-💬 *Username:* ${username}
-📅 *Time:* ${new Date().toLocaleString()}
-  `;
-
-  bot.sendMessage(7078185150, ownerMessage, { parse_mode: "Markdown" });
-});
-
-// /help command handler
-bot.onText(/\/help/, (msg) => {
-  const chatId = msg.chat.id;
-
-  const helpMessage =
-    `🛠 *Help Guide*\n\n` +
-    `🔹 /start - Start the bot and show options\n` +
-    `🔹 /help - Show this help message\n` +
-    `🔹 /status - Check if the bot is running\n\n` +
-    `I monitor new ERC-20 token deployments on PulseChain and notify you in real-time!`;
-
-  bot.sendMessage(chatId, helpMessage, { parse_mode: "Markdown" });
-});
-
-// /status command handler
-bot.onText(/\/status/, (msg) => {
-  const chatId = msg.chat.id;
-
-  bot.sendMessage(chatId, `✅ Bot is online and monitoring PulseChain blocks!`);
-});
-
-// Listen for button press text
-bot.on("message", (msg) => {
-  const chatId = msg.chat.id;
-
-  if (msg.text === "📢 Get Latest Token Info") {
-    bot.sendMessage(chatId, `ℹ️ No recent tokens yet! Stay tuned...`);
-  }
-});
-
-// Send Telegram message from block listener
-async function sendTelegramMessage(message: string) {
+provider.on("pending", async (txHash) => {
   try {
-    await bot.sendMessage(TELEGRAM_CHAT_ID, message, {
-      parse_mode: "Markdown",
-    });
-    console.log("📨 Telegram message sent successfully");
-  } catch (err) {
-    console.error("❌ Error sending Telegram message:", err);
-  }
-}
+    const pendingTx = await provider.getTransaction(txHash);
+    if (!pendingTx || !pendingTx.to) return;
 
-// Block listener for ERC-20 contract detection
-provider.on("block", async (blockNumber) => {
-  console.log(`New block: ${blockNumber}`);
+    if (pendingTx.to.toLowerCase() !== UNISWAP_V2_ROUTER.toLowerCase()) return;
 
-  const block = await provider.getBlock(blockNumber, false);
-  if (!block) {
-    console.log(`Block ${blockNumber} not found`);
-    return;
-  }
-
-  for (const txHash of block.transactions) {
-    const tx = await provider.getTransaction(txHash);
-    if (!tx || tx.to) continue;
-
-    console.log(`New contract creation detected!`);
-    console.log(`Creator: ${tx.from}`);
-    console.log(`Transaction hash: ${tx.hash}`);
-
-    const creatorAddress = tx.from.toLowerCase(); // Normalize
-    const contractAddress = ethers.getCreateAddress({
-      from: tx.from,
-      nonce: tx.nonce,
+    const parsed = iface.parseTransaction({
+      data: pendingTx.data,
+      value: pendingTx.value,
     });
 
-    const erc20Abi = [
-      "function name() view returns (string)",
-      "function symbol() view returns (string)",
-      "function decimals() view returns (uint8)",
-    ];
+    parsedData.push({ parsed, tx: pendingTx });
 
-    const tokenContract = new ethers.Contract(
-      contractAddress,
-      erc20Abi,
-      provider
-    );
+    console.log("===time===", new Date());
+    console.log("\n🚀 Pending Uniswap V2 Swap Detected:");
+    console.log("🔗 Tx Hash:", pendingTx.hash);
+    console.log("👤 From:", pendingTx.from);
+    console.log("📥 Method:", parsed?.name);
+
+    const args = parsed?.args;
+    switch (parsed?.name) {
+      case "swapExactTokensForTokens":
+      case "swapExactTokensForETH":
+        console.log("💰 Amount In:", args?.amountIn.toString());
+        console.log("💸 Min Amount Out:", args?.amountOutMin.toString());
+        break;
+      case "swapExactETHForTokens":
+        console.log(
+          "💰 Amount In (ETH):",
+          (Number(pendingTx.value) / 1000000000000000000)?.toString()
+        );
+        console.log(
+          "💸 Min Amount Out:",
+          (Number(args?.amountOutMin) / 1000000000000000000).toString()
+        );
+        break;
+      case "swapTokensForExactTokens":
+      case "swapTokensForExactETH":
+        console.log("🎯 Amount Out:", args?.amountOut.toString());
+        console.log("💰 Max Amount In:", args?.amountInMax.toString());
+        break;
+      case "swapETHForExactTokens":
+        console.log(
+          "🎯 Amount Out:",
+          (Number(args?.amountOut) / 1000000000000000000).toString()
+        );
+        console.log(
+          "💰 Max ETH In:",
+          (Number(pendingTx.value) / 1000000000000000000)?.toString()
+        );
+        break;
+    }
+
+    console.log("🛣 Path:", args?.path.join(" → "));
+    console.log("📬 Recipient:", args?.to);
+    console.log("⏰ Deadline:", args?.deadline.toString());
 
     try {
-      const name = await tokenContract.name();
-      const symbol = await tokenContract.symbol();
-      const decimals = await tokenContract.decimals();
+      const factory = new ethers.Contract(
+        UNISWAP_V2_FACTORY,
+        UNISWAP_V2_FACTORY_ABI,
+        provider
+      );
+      if (args?.path && args.path.length >= 2) {
+        const tokenA = args.path[0];
+        const tokenB = args.path[1];
+        const pairAddress = await factory.getPair(tokenA, tokenB);
 
-      // CHECK IF CREATOR IS A DEVELOPER
-      const isDeveloper = DEVELOPER_ADDRESSES.includes(creatorAddress);
-
-      let message =
-        `✅ *New ERC-20 Token Detected!*\n\n` +
-        `📝 *Name:* ${name}\n` +
-        `💱 *Symbol:* ${symbol}\n` +
-        `🔢 *Decimals:* ${decimals}\n` +
-        `📄 *Contract Address:* \`${contractAddress}\`\n` +
-        `👤 *Creator:* [${tx.from}](https://scan.pulsechainfoundation.org/#/address/${tx.from})\n` +
-        `🔗 *Tx Hash:* [View Transaction](https://scan.pulsechainfoundation.org/#/tx/${tx.hash})\n` +
-        `⏰ *Time:* ${new Date().toUTCString()}`;
-
-      if (isDeveloper) {
-        message = `🚨 *DEVELOPER TOKEN DEPLOYMENT DETECTED!*\n\n` + message;
+        if (pairAddress !== ethers.ZeroAddress) {
+          console.log("🧪 Pool Address:", pairAddress);
+        } else {
+          console.log("⚠️ Pool not found for path:", tokenA, tokenB);
+        }
       }
-
-      await sendTelegramMessage(message);
-
-      console.log(`✅ ERC-20 Token Found!`);
-      console.log(`Name: ${name}`);
-      console.log(`Symbol: ${symbol}`);
-      console.log(`Decimals: ${decimals}`);
     } catch (err) {
-      console.log(`❌ Not an ERC-20 token at ${contractAddress} ${new Date()}`);
+      console.log("🔍 Failed to fetch pool address", err);
     }
+  } catch (err) {
+    // Ignore harmless errors
   }
 });
 
-// import { Telegraf } from "telegraf";
-// import dotenv from "dotenv";
-// import { checkForNewTokens } from "./pulseWatcher";
-
-// dotenv.config();
-
-// const bot = new Telegraf(process.env.BOT_TOKEN as string);
-// const chatId = process.env.CHAT_ID as string;
-// const DEVELOPER_ADDRESSES = process.env.DEVELOPER_ADDRESSES as string;
-
-// // Clean up the addresses and split into an array
-// const addressesArray = DEVELOPER_ADDRESSES.split(",").map((addr) => addr.trim());
-
-// const POLL_INTERVAL_MS = 5 * 1000; // Poll every 5 seconds
-
-// const startWatching = async () => {
-//   console.log("👀 Bot is watching for new tokens...");
-
-//   setInterval(async () => {
-//     await Promise.all(
-//       addressesArray.map(async (address) => {
-//         try {
-//           const newTokens = await checkForNewTokens(address);
-
-//           if (newTokens.length > 0) {
-//             const message = newTokens
-//               .map((e) =>
-//                 `🚀 New Token Detected!\n` +
-//                 `👤 Developer: ${address}\n` +
-//                 `🏷️ Name: ${e.name}\n` +
-//                 `🔠 Symbol: ${e.symbol}\n` +
-//                 `💰 Balance: ${e.balance}\n` +
-//                 `📜 Contract Address: ${e.contractAddress}\n` +
-//                 `🔢 Decimals: ${e.decimals}\n` +
-//                 `🔧 Type: ${e.type}\n`
-//               )
-//               .join("\n-------------------\n");
-
-//             await bot.telegram.sendMessage(chatId, message);
-//             console.log(`✅ Sent new token notification for ${address}`);
-//           }
-//         } catch (error) {
-//           console.error(`❌ Error checking tokens for ${address}:`, error);
-//         }
-//       })
-//     );
-//   }, POLL_INTERVAL_MS);
-// };
-
-// bot.start((ctx) => {
-//   ctx.reply("✅ Bot started! Watching for new tokens on PulseChain...");
-//   startWatching();
-// });
-
-// bot.launch().then(() => {
-//   console.log("🤖 Telegram bot started!");
-// });
-
-// // Graceful shutdown
-// process.once("SIGINT", () => bot.stop("SIGINT"));
-// process.once("SIGTERM", () => bot.stop("SIGTERM"));
-
-// import { ethers } from "ethers";
-
-// const pulseRpc = "https://rpc.pulsechain.com";
-// const provider = new ethers.JsonRpcProvider(pulseRpc);
-
 // provider.on("block", async (blockNumber) => {
-//   console.log(`New block: ${blockNumber}`);
+//   console.log(`========New block: ${blockNumber}=============== ${new Date()}`);
 
 //   const block = await provider.getBlock(blockNumber, false);
 //   if (!block) {
 //     console.log(`Block ${blockNumber} not found`);
 //     return;
-//   }
+//   } else {
+//     await new Promise((resolve) => setTimeout(resolve, 11000));
+//     interface TokensToBuy {
+//       tokenAddress: string;
+//       ethAmount: number;
+//       tokenAmount: number;
+//     }
+//     let tokensToBuy: TokensToBuy[] = [];
+//     if (parsedData) {
+//       for (const { parsed, tx } of parsedData) {
+//         if (!parsed.args.path) return;
+//         console.log(parsed.args.path,'args path');
+//         const tokenAddress = parsed?.args.path[1];
+//         const ethAmount = Number(tx.value) / 1e18;
+//         const tokenAmount = Number(parsed?.args.amountOutMin) / 1e18;
 
-//   for (const txHash of block.transactions) {
-//     const tx = await provider.getTransaction(txHash);
+//         if (parsed.name === "swapExactETHForTokens") {
+//           const existingIndex = tokensToBuy.findIndex(
+//             (item) => item.tokenAddress === tokenAddress
+//           );
+//           if (existingIndex !== -1) {
+//             tokensToBuy[existingIndex].ethAmount += ethAmount;
+//             tokensToBuy[existingIndex].tokenAmount += tokenAmount;
+//           } else {
+//             tokensToBuy.push({ tokenAddress, ethAmount, tokenAmount });
+//           }
+//         }
 
-//     if (!tx) continue;
-
-//     if (!tx.to) {
-//       const date = new Date();
-
-//       console.log(`New contract creation detected! time: ${date}`);
-//       console.log(`Creator: ${tx.from}`);
-//       console.log(`Transaction hash: ${tx.hash}`);
-
-//       const contractAddress = ethers.getCreateAddress({
-//         from: tx.from,
-//         nonce: tx.nonce,
-//       });
-
-//       console.log(`Contract Address: ${contractAddress}`);
-
-//       const erc20Abi = [
-//         "function name() view returns (string)",
-//         "function symbol() view returns (string)",
-//         "function decimals() view returns (uint8)",
-//       ];
-
-//       const tokenContract = new ethers.Contract(
-//         contractAddress,
-//         erc20Abi,
-//         provider
-//       );
-//       try {
-//         const name = await tokenContract.name();
-//         const symbol = await tokenContract.symbol();
-//         const decimals = await tokenContract.decimals();
-
-//         console.log(`✅ ERC-20 Token Found!`);
-//         console.log(`Name: ${name}`);
-//         console.log(`Symbol: ${symbol}`);
-//         console.log(`Decimals: ${decimals}`);
-//       } catch (err) {
-//         console.log(`Not an ERC-20 token at ${contractAddress}`);
+//         if (parsed.name === "swapETHForExactTokens") {
+//           const existingIndex = tokensToBuy.findIndex(
+//             (item) => item.tokenAddress === tokenAddress
+//           );
+//           if (existingIndex !== -1) {
+//             tokensToBuy[existingIndex].ethAmount -= ethAmount;
+//             tokensToBuy[existingIndex].tokenAmount -= tokenAmount;
+//           } else {
+//             tokensToBuy.push({
+//               tokenAddress,
+//               ethAmount: -ethAmount,
+//               tokenAmount: -tokenAmount,
+//             });
+//           }
+//         }
+//         //left buy logic
+//         console.log(tokensToBuy);
+//         parsedData = [];
 //       }
 //     }
 //   }
 // });
+
+type ReservoirSwapStep = {
+  id: string;
+  items: {
+    status: string;
+    data: {
+      from: string;
+      to: string;
+      data: string;
+      value: string;
+      gas?: string;
+      gasPrice?: string;
+    };
+  }[];
+};
+const privateKey = process.env.PRI_KEY as string;
+const wallet = new ethers.Wallet(privateKey, provider);
+const executeReservoirSwap = async (
+  steps: ReservoirSwapStep[],
+  signer: ethers.Signer
+) => {
+  let tx_hash: string | undefined;
+  for (const step of steps) {
+    for (const item of step.items) {
+      const txData = item.data;
+      const tx = {
+        to: txData.to,
+        data: txData.data,
+        value: txData.value ? ethers.toBigInt(txData.value) : 0n,
+      };
+
+      try {
+        console.log(
+          `📤 Sending ${step.id.toUpperCase()} tx to ${txData.to}...`
+        );
+        const txResponse = await signer.sendTransaction(tx);
+        const receipt = await txResponse.wait();
+        console.log(`✅ ${step.id} confirmed: ${receipt!.hash}`);
+        tx_hash = receipt!.hash;
+        // await delay(2000);
+      } catch (err) {
+        throw err; // You may want to handle or log it better
+      }
+    }
+  }
+  return tx_hash;
+};
+// (async () => {
+//   console.log("starting");
+//   const options = {
+//     method: "POST",
+//     headers: { "Content-Type": "application/json" },
+//     // body: `{"useReceiver":true,"user":"0x2b79343CAc4CD5a4aF2b359ddb718393d2e02280","originChainId":1,"destinationChainId":1,"amount":"800000000000000","originCurrency":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","destinationCurrency":"0xaddF205A24C13e2dd3685bff238b2124E17F0613","tradeType":"EXACT_INPUT","slippageTolerance":"50","appFees":[]}`,
+// body: `{"useReceiver":true,"user":"0x2b79343CAc4CD5a4aF2b359ddb718393d2e02280","originChainId":1,"destinationChainId":1,"amount":"91064698024270","originCurrency":"0xaddF205A24C13e2dd3685bff238b2124E17F0613","destinationCurrency":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","tradeType":"EXACT_INPUT","slippageTolerance":"50","appFees":[]}`,
+//     // body: `{"useReceiver":true,"user":"0x2b79343CAc4CD5a4aF2b359ddb718393d2e02280","originChainId":1,"destinationChainId":1,"amount":"50000000000000","originCurrency":50"}],"userOperationGasOverhead":50000,"forceSolverExecution":false}`,
+//     // body: `{"useReceiver":true,"user":"0x2b79343CAc4CD5a4aF2b359ddb718393d2e02280","originChainId":1,"destinationChainId":1,"amount":"50000000000000","originCurrency":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","destinationCurrency":"0xaddF205A24C13e2dd3685bff238b2124E17F0613","tradeType":"EXACT_INPUT","recipient":"0x2b79343CAc4CD5a4aF2b359ddb718393d2e02280","slippageTolerance":"50","appFees":[{"recipient":"0x0000000000000000000000000000000000000002","fee":"20"}],"userOperationGasOverhead":50000,"forceSolverExecution":true}`,
+//     // body: `{"useReceiver":true,"user":"0x2b79343CAc4CD5a4aF2b359ddb718393d2e02280","originChainId":1,"destinationChainId":1,"amount":"91064698024270","originCurrency":"0xaddF205A24C13e2dd3685bff238b2124E17F0613","destinationCurrency":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","tradeType":"EXACT_INPUT","recipient":"0x2b79343CAc4CD5a4aF2b359ddb718393d2e02280","slippageTolerance":"100","appFees":[],"userOperationGasOverhead":50000,"forceSolverExecution":false}`,
+//   };
+
+//   const res = await fetch("https://api.relay.link/quote", options);
+//   const json = await res.json();
+//   console.log(JSON.stringify(json, null, 2));
+//   const swapRes = await executeReservoirSwap(json.steps, wallet);
+//   console.log("ended");
+// })();
